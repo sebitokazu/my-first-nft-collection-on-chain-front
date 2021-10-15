@@ -12,7 +12,7 @@
           <v-row v-if="!isConnected" justify="center" class="py-4">
             <WalletButton v-on:login="login" />
           </v-row>
-          <div v-else>
+          <div v-else-if="networkId === rinkebyChainId">
             <v-row justify="center">
               <v-col cols="12" md="4">
                 <MintButton v-on:minted="confirmMint" v-on:error="mintError"/>
@@ -23,6 +23,11 @@
            </v-row>
            <v-row>
              <p>Last NFT minted: </p>
+           </v-row>
+           <v-row justify="center">
+             <v-col cols="12" md="6">
+               <NFTCard v-show="nftLoad" :nft.sync="lastNft"/>
+             </v-col>
            </v-row>
           </div>
         </v-container>
@@ -72,6 +77,7 @@ import Footer from "./components/Footer.vue";
 import NavBar from "./components/NavBar.vue";
 import WalletButton from "./components/WalletButton.vue";
 import MintButton from "./components/MintButton.vue";
+import NFTCard from "./components/NFTCard.vue";
 import { ethers } from "ethers";
 import abi from "./assets/abi.json";
 
@@ -82,7 +88,8 @@ export default {
     Footer,
     NavBar,
     WalletButton,
-    MintButton
+    MintButton,
+    NFTCard
   },
 
   data: () => ({
@@ -94,14 +101,19 @@ export default {
     TOTAL_MINT_COUNT:100,
     mintCount:0,
     currentAccount: "",
+    networkId:4,
     snackbar:false,
     timeout:2500,
     snackbarText:"",
     mintedNftSnackbar: false,
     mintedNftSnackbarText:"",
     timeout2:3000,
+    rinkebyChainId: 4,
+    lastNft:{}
   }),
-
+  beforeMount(){
+    this.setupWalletChangeListener();
+  },
   mounted(){
     this.checkIfWalletIsConnected();
   },
@@ -115,23 +127,35 @@ export default {
         } else {
             console.log("We have the ethereum object", ethereum);
         }
+          /*
+          * Check if we're authorized to access the user's wallet
+          */
+          const accounts = await ethereum.request({ method: 'eth_accounts' });
 
-        /*
-        * Check if we're authorized to access the user's wallet
-        */
-        const accounts = await ethereum.request({ method: 'eth_accounts' });
+          /*
+          * User can have multiple authorized accounts, we grab the first one if its there!
+          */
+          if (accounts.length !== 0) {
+              const account = accounts[0];
+              console.log("Found an authorized account:", account);
+              this.currentAccount = account;
 
-        /*
-        * User can have multiple authorized accounts, we grab the first one if its there!
-        */
-        if (accounts.length !== 0) {
-            const account = accounts[0];
-            console.log("Found an authorized account:", account);
-            this.currentAccount = account;
-            this.getTotalMintCount();
-        } else {
-            console.log("No authorized account found");
-        }
+            const provider = new ethers.providers.Web3Provider(ethereum);
+            const {chainId} = await provider.getNetwork();
+
+            this.networkId = chainId;
+
+            if(chainId !== this.rinkebyChainId){
+                console.log("SWITCH TO RINKEBY TESTNET");
+            }else{
+              this.getTotalMintCount();
+              this.getCurrentMintCount();
+            }
+
+          } else {
+              console.log("No authorized account found");
+          }
+        
     },
       // Setup our listener.
     setupEventListener(){
@@ -152,7 +176,8 @@ export default {
             console.log(from, tokenId.toNumber());
             this.mintCount+=1;
             this.mintedNftSnackbar = true;
-            this.mintedNftSnackbarText = `NFT ID: ${tokenId.toNumber()} was minted. It may be blank right now. It can take a max of 10 min to show up on OpenSea. Here's the link: ${this.OPENSEA_LINK}/${process.env.VUE_APP_CONTRACT_ADDRESS}/${tokenId.toNumber()}`;
+            this.mintedNftSnackbarText = `NFT ID: ${tokenId.toNumber()} was minted. Here's the link: ${this.OPENSEA_LINK}/${process.env.VUE_APP_CONTRACT_ADDRESS}/${tokenId.toNumber()}`;
+            this.getLastNftMinted(tokenId);
           });
 
           console.log("Setup event listener!")
@@ -164,9 +189,37 @@ export default {
         console.log(error)
       }
    },
+   async setupWalletChangeListener(){
+     try {
+       const {ethereum} = window;
+
+       if(ethereum){
+        
+          // detect Metamask account change
+          ethereum.on('networkChanged', function (networkId) {
+            console.log(`Switched to networkd: ${networkId}`);
+            this.networkId = networkId;
+            window.location.reload();
+          });
+
+          const provider = new ethers.providers.Web3Provider(ethereum);
+          const {chainId} = await provider.getNetwork();
+
+          if(chainId !== this.rinkebyChainId)
+            console.log("SWITCH TO RINKEBY TESTNET");
+
+       }else{
+         console.log("Ethereum object doesn't exist!");
+       }
+       
+     } catch (error) {
+       console.log(error);
+     }
+   },
     login(account){
       this.currentAccount = account;
       this.getTotalMintCount();
+      this.getCurrentMintCount();
     },
     confirmMint(txnHash){
       this.timeout = null;
@@ -192,6 +245,7 @@ export default {
           
           let maxSupply = await connectedContract.MAX_SUPPLY();
 
+
           this.TOTAL_MINT_COUNT = maxSupply;
 
         } else {
@@ -216,17 +270,45 @@ export default {
 
           this.mintCount = count;
 
+          this.getLastNftMinted(count - 1);
+
         } else {
           console.log("Ethereum object doesn't exist!");
         }
       } catch (error) {
         console.log(error)
       }
+    },
+    async getLastNftMinted(tokenId){
+      try {
+        const { ethereum } = window;
+
+        if (ethereum) {
+          // Same stuff again
+          const provider = new ethers.providers.Web3Provider(ethereum);
+          const signer = provider.getSigner();
+          const connectedContract = new ethers.Contract(process.env.VUE_APP_CONTRACT_ADDRESS, abi.abi, signer);
+
+          let nftOwner = await connectedContract.ownerOf(tokenId);
+          let nftMetadata = await connectedContract.tokenURI(tokenId);
+          this.lastNft = JSON.parse(Buffer.from(nftMetadata.substring(29, nftMetadata.length - 1),'base64').toString());
+          this.lastNft = {...this.lastNft, owner: nftOwner};
+          console.log(this.lastNft);
+
+        } else {
+          console.log("Ethereum object doesn't exist!");
+        }
+      } catch (error) {
+        console.log(error);
+      }
     }
   },
   computed:{
     isConnected(){
       return this.currentAccount !== null && this.currentAccount !== '';
+    },
+    nftLoad(){
+      return Object.keys(this.lastNft).length !== 0;
     }
   }
 };
